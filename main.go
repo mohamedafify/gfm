@@ -1,6 +1,13 @@
 package main
 
+import (
+	"log"
+)
+
 func main() {
+	InitLogger()
+	log.Print("Starting...")
 	term := new(Terminal)
-	term.Init()
+	term.New()
+	term.HandleInput()
 }
