@@ -10,4 +10,5 @@ func main() {
 	term := new(Terminal)
 	term.New()
 	term.HandleInput()
+	defer term.quit()
 }
