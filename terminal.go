@@ -26,7 +26,7 @@ type Terminal struct {
 	// the state in which the terminal was before changes
 	oldState *unix.Termios
 
-	// current termina state
+	// current terminal state
 	state *unix.Termios
 
 	// contains the data to be sent to Stdin
@@ -37,9 +37,11 @@ type Terminal struct {
 	lock sync.Mutex
 
 	// cursorX contains the current X value of the cursor where the left
-	// edge is 0. cursorY contains the row number where the first row of
-	// the current line is 0.
+	// edge is 1. cursorY contains the row number where the first row of
+	// the current line is 1.
 	cursorX, cursorY int
+
+	currentLine int
 
 	// the buffer to write to
 	c io.ReadWriter
@@ -49,10 +51,11 @@ type Terminal struct {
 }
 
 type File struct {
-	name  string
-	path  string
-	isDir bool
-	size  int64
+	name      string
+	path      string
+	isDir     bool
+	size      int64
+	directory string
 }
 
 func (term *Terminal) String() string {
@@ -60,13 +63,13 @@ func (term *Terminal) String() string {
 }
 
 func (term *Terminal) New() {
-
 	term.size = new(Size)
 	term.oldState = new(unix.Termios)
 	term.state = new(unix.Termios)
 	term.outBuf = make([]byte, 0)
 	term.cursorX = 1
 	term.cursorY = 1
+	term.currentLine = 1
 	term.c = os.Stdin
 	term.files = make([]File, 0)
 
@@ -76,6 +79,14 @@ func (term *Terminal) New() {
 
 	term.hideCursor()
 	// 	term.addBackground()
+
+	log.Println("Getting directory info...")
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Println("Failed to get cwd")
+		term.quit()
+	}
+	term.setFolderDetails(cwd)
 	term.updateScreen()
 	term.Write()
 }
@@ -113,45 +124,65 @@ func (term *Terminal) move(x, y int) {
 		term.cursorY = y
 	}
 
+	log.Printf("moving to: %dx%d\n", x, y)
 	log.Printf("current position: %dx%d\n", term.cursorX, term.cursorY)
 	term.queue([]byte(fmt.Sprintf("\x1b[%d;%dH", y, x)))
+	term.updateScreen()
 }
 
 func (term *Terminal) moveUp(n int) {
-	if term.cursorY-n <= 1 {
-		term.cursorY = 1
+	if term.currentLine-n < 1 {
+		term.currentLine = 1
+	} else if term.currentLine-n > len(term.files) {
+		term.currentLine = len(term.files)
 	} else {
-		term.cursorY -= n
+		term.currentLine = term.currentLine - n
 	}
 
-	log.Printf("current position: %dx%d\n", term.cursorX, term.cursorY)
-	term.queue([]byte(fmt.Sprintf("\x1b[%dA", n)))
+	log.Printf("current line: %d", term.currentLine)
+	term.updateScreen()
+	// term.move(term.cursorX, term.cursorY-1)
 }
 
 func (term *Terminal) moveDown(n int) {
-	if term.cursorY+n >= int(term.size.height) {
-		term.cursorY = int(term.size.height)
+	if term.currentLine+n < 1 {
+		term.currentLine = 1
+	} else if term.currentLine+n > len(term.files) {
+		term.currentLine = len(term.files)
 	} else {
-		term.cursorY += n
+		term.currentLine = term.currentLine + n
 	}
 
-	log.Printf("current position: %dx%d\n", term.cursorX, term.cursorY)
-	term.queue([]byte(fmt.Sprintf("\x1b[%dB", n)))
+	log.Printf("current line: %d", term.currentLine)
+	term.updateScreen()
+	// term.move(term.cursorX, term.cursorY+1)
 }
 
-func (term *Terminal) moveIn() {
-	//TODO
-	// if file open depending on extension
-	// else if directory go into and load files
+func (term *Terminal) moveIn() error {
+	currentFile := term.files[term.currentLine-1]
+	log.Printf("current file: %v", currentFile)
+	if currentFile.isDir {
+		term.setFolderDetails(currentFile.path)
+		term.updateScreen()
+	} else {
+		// handle files
+	}
+	return nil
 }
 
-func (term *Terminal) moveOut() {
-	//TODO
-	// if directory go outof and load files
+func (term *Terminal) moveOut() error {
+	currentFile := term.files[term.currentLine-1]
+	backFolder := fmt.Sprintf("%v/..", currentFile.directory)
+	log.Print(backFolder)
+	term.setFolderDetails(backFolder)
+	term.updateScreen()
+	return nil
 }
 
 func (term *Terminal) moveTop() {
-	term.queue([]byte("\x1b[H"))
+	//TODO MUST DIFFRENTIATE BETWEEN LOGICAL CURSOR MOVMENT AND UI CURSOR MOVMENT
+	term.currentLine = 1
+	term.updateScreen()
 }
 
 func (term *Terminal) scrollUp(n int) {
@@ -193,7 +224,8 @@ func (term *Terminal) HandleInput() error {
 
 func (term *Terminal) quit() {
 	log.Print("Quitting...")
-	term.clearScreen()
+	term.showCursor()
+	term.Write()
 	term.disableRawMode()
 	stopLogger()
 	os.Exit(0)
@@ -260,12 +292,13 @@ func (term *Terminal) disableRawMode() error {
 		return errors.New("Syscall failed to set new term info")
 	}
 
+	// Return to main buffer
+	os.Stdout.Write([]byte("\x1b[?1049l"))
 	return nil
 }
 
 func (term *Terminal) clearScreen() {
-	term.queue([]byte("\x1b[2J"))
-	term.moveTop()
+	term.queue([]byte("\x1b[2J\x1b[H"))
 }
 
 func (term *Terminal) addBackground() error {
@@ -284,71 +317,101 @@ func (term *Terminal) addBackground() error {
 	return nil
 }
 
-func (term *Terminal) updateScreen() error {
-	term.clearScreen()
-	if len(term.files) == 0 {
-		log.Println("Getting directory info...")
-		path, found := unix.Getenv("HOME")
+// get folder details
+func (term *Terminal) setFolderDetails(path string) error {
+	// clear files
+	term.files = term.files[:0]
 
-		if !found {
-			log.Println("Failed to get $HOME enviroment variable, using current working directory")
-			cwd, err := os.Getwd()
-			if err != nil {
-				log.Fatalln("Failed to get cwd")
-			}
-			path = cwd
-		}
-
-		folder, err := os.Open(path)
-		if err != nil {
-			log.Println("failed to open folder", path)
-			return err
-		}
-
-		defer folder.Close()
-
-		folderContent, err := folder.ReadDir(0)
-		if err != nil {
-			log.Println("failed to get folder content", path)
-			return err
-		}
-
-		for i := 0; i < len(folderContent); i++ {
-
-			details, err := folderContent[i].Info()
-			if err != nil {
-				log.Println("failed to get file info", path)
-				return err
-			}
-
-			name := folderContent[i].Name()
-			isDir := folderContent[i].IsDir()
-			size := details.Size()
-			if name[0] == '.' || name[0:1] == ".." {
-				continue
-			}
-			unix.Getenv("HOME")
-
-			term.files = append(term.files, File{
-				name:  name,
-				isDir: isDir,
-				size:  size,
-			})
-		}
+	folder, err := os.Open(path)
+	if err != nil {
+		log.Printf("failed to open folder %v, with error: %v", path, err)
+		return err
 	}
 
+	defer folder.Close()
+
+	folderContent, err := folder.ReadDir(0)
+	if err != nil {
+		log.Println("failed to get folder content", path)
+		return err
+	}
+
+	for i := 0; i < len(folderContent); i++ {
+		details, err := folderContent[i].Info()
+		if err != nil {
+			log.Println("failed to get file info", path)
+			return err
+		}
+
+		name := folderContent[i].Name()
+		isDir := folderContent[i].IsDir()
+		size := details.Size()
+		if name[0] == '.' || name[0:1] == ".." {
+			continue
+		}
+		term.files = append(term.files, File{
+			name:      name,
+			isDir:     isDir,
+			size:      size,
+			path:      fmt.Sprintf("%v/%v", path, name),
+			directory: path,
+		})
+	}
+
+	// reset current line to 1
+	term.currentLine = 1
+
+	return nil
+}
+
+// drawFiles take a folder path and fetch its data
+// and draw it in the window
+func (term *Terminal) drawFiles() error {
 	for i := 0; i < len(term.files); i++ {
-		term.queue([]byte(term.files[i].name))
+		file := term.files[i]
+		if file.isDir {
+			term.queue([]byte(fmt.Sprintf("\x1b[38;2;%v", getColorANSI(blue))))
+		} else {
+			term.queue([]byte(fmt.Sprintf("\x1b[38;2;%v", getColorANSI(yellow))))
+		}
+
+		// inverse colors to highlight current selected file
+		if term.currentLine == i+1 {
+			term.queue([]byte("\x1b[7m"))
+		}
+
+		term.queue([]byte(file.name))
+		emptySpace := term.size.width - len(file.name)
+		for i := 0; i < emptySpace; i++ {
+			term.queue([]byte("\x20"))
+		}
+
+		// reset all attributes
+		term.queue([]byte("\x1b[0m"))
+
+		// move to next line
 		term.queue([]byte("\x1b[E"))
 	}
 
-	term.move(term.cursorX, term.cursorY)
+	// move back to top
+	term.queue([]byte("\x1b[H"))
 
+	return nil
+}
+
+func (term *Terminal) updateScreen() error {
+	log.Println("Updating screen...")
+	term.clearScreen()
+	term.drawFiles()
 	return nil
 }
 
 func (term *Terminal) hideCursor() {
 	term.queue([]byte("\x1b[?25l"))
+}
+
+func (term *Terminal) showCursor() {
+	term.queue([]byte("\x1b[?25h"))
 }
 
 func (term *Terminal) enableRawMode() error {
@@ -382,6 +445,9 @@ func (term *Terminal) enableRawMode() error {
 	if errno2 != 0 {
 		return errors.New("Syscall failed to set new term info")
 	}
+
+	// open in new clean buffer
+	os.Stdout.Write([]byte("\x1b[?1049h"))
 
 	return nil
 }
