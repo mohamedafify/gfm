@@ -10,10 +10,9 @@ import (
 	"sync"
 	"unsafe"
 
+	ansi "github.com/mohamedafify/gfm/ANSI"
 	"golang.org/x/sys/unix"
 )
-
-const space = byte(' ')
 
 type Size struct {
 	width, height int
@@ -126,7 +125,7 @@ func (term *Terminal) move(x, y int) {
 
 	log.Printf("moving to: %dx%d\n", x, y)
 	log.Printf("current position: %dx%d\n", term.cursorX, term.cursorY)
-	term.queue([]byte(fmt.Sprintf("\x1b[%d;%dH", y, x)))
+	term.queue(ansi.MoveCursor(x, y))
 	term.updateScreen()
 }
 
@@ -141,7 +140,6 @@ func (term *Terminal) moveUp(n int) {
 
 	log.Printf("current line: %d", term.currentLine)
 	term.updateScreen()
-	// term.move(term.cursorX, term.cursorY-1)
 }
 
 func (term *Terminal) moveDown(n int) {
@@ -155,7 +153,6 @@ func (term *Terminal) moveDown(n int) {
 
 	log.Printf("current line: %d", term.currentLine)
 	term.updateScreen()
-	// term.move(term.cursorX, term.cursorY+1)
 }
 
 func (term *Terminal) moveIn() error {
@@ -165,9 +162,12 @@ func (term *Terminal) moveIn() error {
 		term.setFolderDetails(currentFile.path)
 		term.updateScreen()
 	} else {
-		// handle files
+		handleOpenFile(currentFile.path)
 	}
 	return nil
+}
+
+func handleOpenFile(path string) {
 }
 
 func (term *Terminal) moveOut() error {
@@ -180,17 +180,16 @@ func (term *Terminal) moveOut() error {
 }
 
 func (term *Terminal) moveTop() {
-	//TODO MUST DIFFRENTIATE BETWEEN LOGICAL CURSOR MOVMENT AND UI CURSOR MOVMENT
 	term.currentLine = 1
 	term.updateScreen()
 }
 
 func (term *Terminal) scrollUp(n int) {
-	term.queue([]byte(fmt.Sprintf("\x1b[%dS", n)))
+	term.queue(ansi.ScrollUp(n))
 }
 
 func (term *Terminal) scrollDown(n int) {
-	term.queue([]byte(fmt.Sprintf("\x1b[%dT", n)))
+	term.queue(ansi.ScrollDown(n))
 }
 
 func (term *Terminal) HandleInput() error {
@@ -292,26 +291,24 @@ func (term *Terminal) disableRawMode() error {
 		return errors.New("Syscall failed to set new term info")
 	}
 
-	// Return to main buffer
-	os.Stdout.Write([]byte("\x1b[?1049l"))
+	os.Stdout.Write(ansi.ResetBuffer)
 	return nil
 }
 
 func (term *Terminal) clearScreen() {
-	term.queue([]byte("\x1b[2J\x1b[H"))
+	term.queue(ansi.ClearScreen)
+	term.queue(ansi.MoveTop)
 }
 
 func (term *Terminal) addBackground() error {
 	term.clearScreen()
 	entireScreenSize := int(term.size.height) * int(term.size.width)
 
-	// set color
-	color := []byte(fmt.Sprintf("\x1b[48;2;%v", getColorANSI(black)))
-	term.queue(color)
+	term.queue(ansi.SetBGColor(ansi.Black))
 
 	// draw background
 	for i := 0; i < entireScreenSize; i++ {
-		term.queue([]byte("\x20"))
+		term.queue([]byte{ansi.Space})
 	}
 
 	return nil
@@ -370,32 +367,27 @@ func (term *Terminal) drawFiles() error {
 	for i := 0; i < len(term.files); i++ {
 		file := term.files[i]
 		if file.isDir {
-			term.queue([]byte(fmt.Sprintf("\x1b[38;2;%v", getColorANSI(blue))))
+			term.queue(ansi.SetFGColor(ansi.Blue))
 		} else {
-			term.queue([]byte(fmt.Sprintf("\x1b[38;2;%v", getColorANSI(yellow))))
+			term.queue(ansi.SetFGColor(ansi.Yellow))
 		}
 
 		// inverse colors to highlight current selected file
 		if term.currentLine == i+1 {
-			term.queue([]byte("\x1b[7m"))
+			term.queue(ansi.InverseColors)
 		}
 
 		term.queue([]byte(file.name))
 		emptySpace := term.size.width - len(file.name)
 		for i := 0; i < emptySpace; i++ {
-			term.queue([]byte("\x20"))
+			term.queue([]byte{ansi.Space})
 		}
 
-		// reset all attributes
-		term.queue([]byte("\x1b[0m"))
-
-		// move to next line
-		term.queue([]byte("\x1b[E"))
+		term.queue(ansi.ResetTextAttributes)
+		term.queue(ansi.MoveOnNewLine)
 	}
 
-	// move back to top
-	term.queue([]byte("\x1b[H"))
-
+	term.queue(ansi.MoveTop)
 	return nil
 }
 
@@ -407,11 +399,11 @@ func (term *Terminal) updateScreen() error {
 }
 
 func (term *Terminal) hideCursor() {
-	term.queue([]byte("\x1b[?25l"))
+	term.queue(ansi.HideCursor)
 }
 
 func (term *Terminal) showCursor() {
-	term.queue([]byte("\x1b[?25h"))
+	term.queue(ansi.ShowCursor)
 }
 
 func (term *Terminal) enableRawMode() error {
@@ -447,7 +439,7 @@ func (term *Terminal) enableRawMode() error {
 	}
 
 	// open in new clean buffer
-	os.Stdout.Write([]byte("\x1b[?1049h"))
+	os.Stdout.Write(ansi.CleanBuffer)
 
 	return nil
 }
